@@ -23,11 +23,10 @@ import org.junit.jupiter.api.Test;
 class DaxExceptionTest {
 
     @Test
-    void syntaxExceptionKeepsPosition() {
-        DaxSyntaxException e = new DaxSyntaxException("unexpected token", 3, 7, null);
-        assertThat(e.line()).isEqualTo(3);
-        assertThat(e.column()).isEqualTo(7);
-        assertThat(e).hasMessage("unexpected token");
+    void syntaxExceptionKeepsMessageAndCause() {
+        IllegalStateException cause = new IllegalStateException("parser");
+        DaxSyntaxException e = new DaxSyntaxException("unexpected token at 3:7", cause);
+        assertThat(e).hasMessage("unexpected token at 3:7").hasCause(cause);
     }
 
     @Test
@@ -39,7 +38,7 @@ class DaxExceptionTest {
 
     @Test
     void columnRequiresParts() {
-        assertThatNullPointerException().isThrownBy(() -> new DaxColumn(null, Optional.empty(), DaxType.STRING, false));
-        assertThatNullPointerException().isThrownBy(() -> new DaxColumn("[x]", null, DaxType.STRING, false));
+        assertThatNullPointerException().isThrownBy(() -> new DaxColumn(null, Optional.empty(), DaxType.STRING));
+        assertThatNullPointerException().isThrownBy(() -> new DaxColumn("[x]", null, DaxType.STRING));
     }
 }

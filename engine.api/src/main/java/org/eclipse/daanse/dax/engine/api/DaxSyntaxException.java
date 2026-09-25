@@ -13,38 +13,22 @@
 package org.eclipse.daanse.dax.engine.api;
 
 /**
- * The query text is not valid DAX.
+ * The query text is not valid DAX. The message tells where, as the parser
+ * does.
  */
 public final class DaxSyntaxException extends DaxException {
 
     private static final long serialVersionUID = 1L;
 
-    /** Line or column of an error whose position is not known. */
-    public static final int UNKNOWN_POSITION = -1;
-
-    private final int line;
-    private final int column;
+    public DaxSyntaxException(String message) {
+        super(message);
+    }
 
     /**
-     * @param message the description of the error
-     * @param line    the 1-based line of the error, or {@link #UNKNOWN_POSITION}
-     * @param column  the 1-based column of the error, or
-     *                {@link #UNKNOWN_POSITION}
-     * @param cause   the parser's failure; may be {@code null}
+     * @param message the description of the error, with its position
+     * @param cause   the parser's failure
      */
-    public DaxSyntaxException(String message, int line, int column, Throwable cause) {
+    public DaxSyntaxException(String message, Throwable cause) {
         super(message, cause);
-        this.line = line;
-        this.column = column;
-    }
-
-    /** @return the 1-based line of the error, or {@link #UNKNOWN_POSITION} */
-    public int line() {
-        return line;
-    }
-
-    /** @return the 1-based column of the error, or {@link #UNKNOWN_POSITION} */
-    public int column() {
-        return column;
     }
 }

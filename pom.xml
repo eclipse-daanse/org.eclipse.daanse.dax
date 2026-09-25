@@ -64,6 +64,7 @@
     <module>unparser.simple</module>
     <module>unparser.formatted</module>
     <module>engine.api</module>
+    <module>engine.impl</module>
   </modules>
 
   <dependencies>

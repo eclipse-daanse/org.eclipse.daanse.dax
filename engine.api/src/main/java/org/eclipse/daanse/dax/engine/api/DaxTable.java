@@ -21,9 +21,6 @@ import java.util.List;
  */
 public interface DaxTable {
 
-    /** @return the 0-based index of the {@code EVALUATE} in the query */
-    int index();
-
     /** @return the columns, in order */
     List<DaxColumn> columns();
 

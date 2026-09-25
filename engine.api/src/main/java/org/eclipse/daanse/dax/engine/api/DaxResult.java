@@ -28,12 +28,6 @@ package org.eclipse.daanse.dax.engine.api;
 public interface DaxResult extends AutoCloseable {
 
     /**
-     * @return the number of tables, which is the number of {@code EVALUATE}s
-     *         of the query; known before any row is read
-     */
-    int tableCount();
-
-    /**
      * Moves to the table of the next {@code EVALUATE}; rows left in the
      * previous table are skipped and that table can no longer be read.
      *

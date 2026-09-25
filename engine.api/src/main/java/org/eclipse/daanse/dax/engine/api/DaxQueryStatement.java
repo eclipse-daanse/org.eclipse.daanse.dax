@@ -15,8 +15,8 @@ package org.eclipse.daanse.dax.engine.api;
 import java.time.Duration;
 
 /**
- * Executes DAX queries on a {@link DaxConnection}. Named so to not clash with
- * the syntax tree's {@code DaxStatement}.
+ * Executes DAX queries on the connection an engine created it for. Named so
+ * to not clash with the syntax tree's {@code DaxStatement}.
  * <p>
  * A statement runs one query at a time; executing another one closes the
  * result of the previous. Only {@link #cancel()} may be called from
@@ -37,9 +37,6 @@ public interface DaxQueryStatement extends AutoCloseable {
      */
     void setParameter(String name, Object value);
 
-    /** Removes all parameter values. */
-    void clearParameters();
-
     /**
      * @param timeout the time after which executing a query fails with
      *                {@link DaxCancelledException.Reason#TIMEOUT};
@@ -47,9 +44,6 @@ public interface DaxQueryStatement extends AutoCloseable {
      * @throws IllegalArgumentException if the timeout is negative
      */
     void setTimeout(Duration timeout);
-
-    /** @return the timeout; {@link Duration#ZERO} for none */
-    Duration getTimeout();
 
     /**
      * Executes a DAX query.
@@ -76,9 +70,6 @@ public interface DaxQueryStatement extends AutoCloseable {
      * thread.
      */
     void cancel();
-
-    /** @return whether this statement is closed */
-    boolean isClosed();
 
     /** Closes this statement and its open result. Idempotent. */
     @Override

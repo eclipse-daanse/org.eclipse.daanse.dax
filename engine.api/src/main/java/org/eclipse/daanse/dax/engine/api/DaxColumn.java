@@ -23,9 +23,8 @@ import java.util.Optional;
  * @param table   the model table the column belongs to; empty for a column
  *                the query computes
  * @param type    the type of the values
- * @param measure whether the values come from a measure
  */
-public record DaxColumn(String name, Optional<String> table, DaxType type, boolean measure) {
+public record DaxColumn(String name, Optional<String> table, DaxType type) {
 
     public DaxColumn {
         Objects.requireNonNull(name, "name");
