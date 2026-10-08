@@ -20,7 +20,6 @@ import java.util.Optional;
 import java.util.Set;
 
 import org.eclipse.daanse.dax.engine.api.DaxColumn;
-import org.eclipse.daanse.dax.engine.api.DaxType;
 import org.eclipse.daanse.dax.engine.impl.model.ModelColumn;
 import org.eclipse.daanse.dax.engine.impl.model.ModelMeasure;
 import org.eclipse.daanse.dax.model.api.expression.LogicalExpression.LogicalOperator;
@@ -206,7 +205,7 @@ public record Summarize(List<ModelColumn> groupBy, List<NamedMeasure> measures, 
             columns.add(new DaxColumn(column.daxName(), Optional.of(column.table()), column.type()));
         }
         for (NamedMeasure measure : allMeasures()) {
-            columns.add(new DaxColumn("[" + measure.name() + "]", Optional.empty(), DaxType.VARIANT));
+            columns.add(new DaxColumn("[" + measure.name() + "]", Optional.empty(), measure.type()));
         }
         return columns;
     }

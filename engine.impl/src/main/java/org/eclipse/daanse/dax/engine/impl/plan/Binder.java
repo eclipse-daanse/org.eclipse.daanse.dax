@@ -1047,8 +1047,9 @@ public final class Binder {
                     throw notSupported("ADDCOLUMNS with a measure in an expression with columns, IN, BLANK or dates");
                 }
                 // computed by the cube, for each row
-                onCube.add(new NamedMeasure(name, expression));
-                added.add(new AddColumns.Added(name, new ColumnValue(width + onCube.size() - 1), DaxType.VARIANT));
+                NamedMeasure measure = new NamedMeasure(name, expression);
+                onCube.add(measure);
+                added.add(new AddColumns.Added(name, new ColumnValue(width + onCube.size() - 1), measure.type()));
             } else {
                 added.add(new AddColumns.Added(name, expression, type(expression, columns)));
             }
@@ -1097,7 +1098,7 @@ public final class Binder {
         return switch (plan) {
         case Constant constant -> constant.value() == null ? DaxType.VARIANT : DaxType.of(constant.value());
         case ColumnValue column -> columns.get(column.column()).type();
-        case MeasureValue measure -> DaxType.VARIANT;
+        case MeasureValue measure -> measure.measure().type();
         case Comparison comparison -> DaxType.BOOLEAN;
         case InList in -> DaxType.BOOLEAN;
         case Logical logical -> DaxType.BOOLEAN;

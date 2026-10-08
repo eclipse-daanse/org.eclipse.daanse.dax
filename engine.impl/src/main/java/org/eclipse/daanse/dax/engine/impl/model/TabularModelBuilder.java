@@ -17,6 +17,7 @@ import java.util.List;
 import java.util.Optional;
 
 import org.eclipse.daanse.dax.engine.api.DaxType;
+import org.eclipse.daanse.olap.api.DataTypeJdbc;
 import org.eclipse.daanse.dax.engine.impl.mdx.MdxNames;
 import org.eclipse.daanse.olap.api.catalog.CatalogReader;
 import org.eclipse.daanse.olap.api.element.Cube;
@@ -25,6 +26,8 @@ import org.eclipse.daanse.olap.api.element.Hierarchy;
 import org.eclipse.daanse.olap.api.element.Level;
 import org.eclipse.daanse.olap.api.element.Member;
 import org.eclipse.daanse.olap.api.element.Property;
+import org.eclipse.daanse.olap.api.element.StoredMeasure;
+import org.eclipse.daanse.olap.api.result.Property.StandardCellProperty;
 
 /**
  * Builds the {@link TabularModel} of a cube, as a role sees it.
@@ -62,7 +65,8 @@ public final class TabularModelBuilder {
         List<ModelMeasure> measures = new ArrayList<>();
         for (Member measure : cube.getMeasures()) {
             if (measure.isVisible()) {
-                measures.add(new ModelMeasure(measure.getName(), measure.getUniqueName(), !measure.isCalculated()));
+                measures.add(new ModelMeasure(measure.getName(), measure.getUniqueName(), !measure.isCalculated(),
+                        measureType(measure)));
             }
         }
         return new TabularModel(MdxNames.quote(cube.getName()), tables, measures);
@@ -104,6 +108,53 @@ public final class TabularModelBuilder {
         case TYPE_BOOLEAN -> DaxType.BOOLEAN;
         case TYPE_DATE, TYPE_TIME, TYPE_TIMESTAMP -> DaxType.DATETIME;
         case TYPE_STRING, TYPE_OTHER -> DaxType.STRING;
+        };
+    }
+
+    /**
+     * The type of a measure's values, as the CSDL of the cube declares it
+     * (DefaultTypeMapper.measureType of the XMLA connector): by the aggregator,
+     * else by the type of the measure's source.
+     */
+    static DaxType measureType(Member measure) {
+        String aggregator = measure instanceof StoredMeasure stored ? stored.getAggregateFunction() : "None";
+        Optional<DaxType> source = sourceType(measure);
+        return switch (aggregator) {
+        case "count", "distinct-count" -> DaxType.INTEGER;
+        case "sum" -> DaxType.DECIMAL;
+        case "avg" -> source.filter(DaxType.DECIMAL::equals).orElse(DaxType.DOUBLE);
+        case "min", "max" -> source.orElse(DaxType.DECIMAL);
+        case "listagg" -> DaxType.STRING;
+        default -> DaxType.DECIMAL;
+        };
+    }
+
+    private static Optional<DaxType> sourceType(Member measure) {
+        Object datatype = measure.getPropertyValue(StandardCellProperty.DATATYPE.getName());
+        if (datatype instanceof String name) {
+            return switch (name) {
+            case "UNDEFINED", "String" -> Optional.of(DaxType.STRING);
+            case "NUMERIC" -> Optional.of(DaxType.DECIMAL);
+            case "Integer" -> Optional.of(DaxType.INTEGER);
+            case "Boolean" -> Optional.of(DaxType.BOOLEAN);
+            case "Date", "Time", "Timestamp" -> Optional.of(DaxType.DATETIME);
+            default -> Optional.empty();
+            };
+        }
+        if (measure instanceof StoredMeasure stored) {
+            return stored.getDataType().map(TabularModelBuilder::type);
+        }
+        return Optional.empty();
+    }
+
+    private static DaxType type(DataTypeJdbc type) {
+        return switch (type) {
+        case VARCHAR -> DaxType.STRING;
+        case NUMERIC, FLOAT, REAL, DOUBLE -> DaxType.DECIMAL;
+        case INTEGER, BIGINT, SMALLINT -> DaxType.INTEGER;
+        case BOOLEAN -> DaxType.BOOLEAN;
+        case DATE, TIME, TIMESTAMP -> DaxType.DATETIME;
+        default -> DaxType.VARIANT;
         };
     }
 
