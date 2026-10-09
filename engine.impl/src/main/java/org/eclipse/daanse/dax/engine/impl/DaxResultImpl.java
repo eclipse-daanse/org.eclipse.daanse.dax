@@ -33,6 +33,7 @@ import org.eclipse.daanse.dax.engine.impl.plan.EvaluatePlan;
 import org.eclipse.daanse.dax.engine.impl.plan.EvaluatePlan.SortKey;
 import org.eclipse.daanse.dax.engine.impl.plan.Filter;
 import org.eclipse.daanse.dax.engine.impl.plan.Generate;
+import org.eclipse.daanse.dax.engine.impl.plan.Rollup;
 import org.eclipse.daanse.dax.engine.impl.plan.Sample;
 import org.eclipse.daanse.dax.engine.impl.plan.Summarize;
 import org.eclipse.daanse.dax.engine.impl.plan.TablePlan;
@@ -107,6 +108,13 @@ final class DaxResultImpl implements DaxResult {
         case TopN topN -> topN.apply(rows(topN.source()));
         case Sample sample -> sample.apply(rows(sample.source()));
         case AddColumns addColumns -> addColumns.apply(rows(addColumns.source()));
+        case Rollup rollup -> {
+            List<List<List<Object>>> levels = new ArrayList<>();
+            for (TablePlan level : rollup.levels()) {
+                levels.add(rows(level));
+            }
+            yield rollup.apply(levels);
+        }
         };
     }
 

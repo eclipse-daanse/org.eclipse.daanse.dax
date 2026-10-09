@@ -32,6 +32,8 @@ import org.eclipse.daanse.olap.api.element.Hierarchy;
 import org.eclipse.daanse.olap.api.element.Level;
 import org.eclipse.daanse.olap.api.element.Member;
 import org.eclipse.daanse.olap.api.element.Property;
+import org.eclipse.daanse.olap.api.element.StoredMeasure;
+import org.eclipse.daanse.olap.api.DataTypeJdbc;
 import org.junit.jupiter.api.Test;
 
 class TabularModelBuilderTest {
@@ -76,7 +78,7 @@ class TabularModelBuilderTest {
                 new ModelColumn("Product", "Product.Alt.Category", "[Product].[Alt]", "[Product].[Alt].[Category]", 1,
                         DaxType.STRING));
         assertThat(model.measures()).containsOnlyKeys("Sales Amount");
-        assertThat(model.measure("sales amount")).contains(new ModelMeasure("Sales Amount", "[Measures].[Sales Amount]", true));
+        assertThat(model.measure("sales amount")).contains(new ModelMeasure("Sales Amount", "[Measures].[Sales Amount]", true, DaxType.DECIMAL));
     }
 
     @Test
@@ -135,5 +137,24 @@ class TabularModelBuilderTest {
         assertThat(table.column("customers.customers.name.gender")).map(ModelColumn::property)
                 .contains(Optional.of("Gender"));
         assertThat(table.column("Customers.Customers.City")).map(ModelColumn::property).contains(Optional.empty());
+    }
+
+    @Test
+    void measuresAreTypedAsCsdlDeclaresThem() {
+        assertThat(TabularModelBuilder.measureType(stored("sum", Optional.of(DataTypeJdbc.INTEGER))))
+                .isEqualTo(DaxType.DECIMAL);
+        assertThat(TabularModelBuilder.measureType(stored("count", Optional.empty()))).isEqualTo(DaxType.INTEGER);
+        assertThat(TabularModelBuilder.measureType(stored("avg", Optional.of(DataTypeJdbc.INTEGER))))
+                .isEqualTo(DaxType.DOUBLE);
+        assertThat(TabularModelBuilder.measureType(stored("max", Optional.of(DataTypeJdbc.INTEGER))))
+                .isEqualTo(DaxType.INTEGER);
+        assertThat(TabularModelBuilder.measureType(measure("Calculated"))).isEqualTo(DaxType.DECIMAL);
+    }
+
+    private static StoredMeasure stored(String aggregator, Optional<DataTypeJdbc> dataType) {
+        StoredMeasure measure = mock(StoredMeasure.class);
+        when(measure.getAggregateFunction()).thenReturn(aggregator);
+        when(measure.getDataType()).thenReturn(dataType);
+        return measure;
     }
 }

@@ -14,6 +14,7 @@ package org.eclipse.daanse.dax.engine.impl.plan;
 
 import java.util.Objects;
 
+import org.eclipse.daanse.dax.engine.api.DaxType;
 import org.eclipse.daanse.dax.engine.impl.model.ModelMeasure;
 
 /**
@@ -35,5 +36,13 @@ public record NamedMeasure(String name, ScalarPlan expression) {
     /** A measure of the model as a result column. */
     public NamedMeasure(String name, ModelMeasure measure) {
         this(name, new ScalarPlan.MeasureValue(measure));
+    }
+
+    /**
+     * @return the type of the column: the measure's, or {@link DaxType#VARIANT}
+     *         for an expression of measures
+     */
+    public DaxType type() {
+        return expression instanceof ScalarPlan.MeasureValue value ? value.measure().type() : DaxType.VARIANT;
     }
 }

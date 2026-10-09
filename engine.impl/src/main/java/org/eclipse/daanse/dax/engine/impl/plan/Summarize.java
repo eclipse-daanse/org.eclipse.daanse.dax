@@ -18,9 +18,9 @@ import java.util.List;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
+import java.util.function.UnaryOperator;
 
 import org.eclipse.daanse.dax.engine.api.DaxColumn;
-import org.eclipse.daanse.dax.engine.api.DaxType;
 import org.eclipse.daanse.dax.engine.impl.model.ModelColumn;
 import org.eclipse.daanse.dax.engine.impl.model.ModelMeasure;
 import org.eclipse.daanse.dax.model.api.expression.LogicalExpression.LogicalOperator;
@@ -92,6 +92,23 @@ public record Summarize(List<ModelColumn> groupBy, List<NamedMeasure> measures, 
     /** A grouping keeping all groups. */
     public Summarize(List<ModelColumn> groupBy, List<NamedMeasure> measures) {
         this(groupBy, measures, Optional.empty());
+    }
+
+    /**
+     * @param replaced the measure to compute instead of each
+     * @return this grouping computing the measures it gives instead, by the same
+     *         names
+     */
+    public Summarize withMeasures(UnaryOperator<ModelMeasure> replaced) {
+        return new Summarize(groupBy, named(measures, replaced),
+                condition.map(c -> ScalarPlan.withMeasures(c, replaced)),
+                top.map(t -> new Top(t.count(), replaced.apply(t.measure()), t.ascending())), filters,
+                named(added, replaced));
+    }
+
+    private static List<NamedMeasure> named(List<NamedMeasure> measures, UnaryOperator<ModelMeasure> replaced) {
+        return measures.stream()
+                .map(m -> new NamedMeasure(m.name(), ScalarPlan.withMeasures(m.expression(), replaced))).toList();
     }
 
     /** @return this grouping keeping only the groups it keeps for which the condition is TRUE too */
@@ -206,7 +223,7 @@ public record Summarize(List<ModelColumn> groupBy, List<NamedMeasure> measures, 
             columns.add(new DaxColumn(column.daxName(), Optional.of(column.table()), column.type()));
         }
         for (NamedMeasure measure : allMeasures()) {
-            columns.add(new DaxColumn("[" + measure.name() + "]", Optional.empty(), DaxType.VARIANT));
+            columns.add(new DaxColumn("[" + measure.name() + "]", Optional.empty(), measure.type()));
         }
         return columns;
     }

@@ -106,6 +106,22 @@ class TableResultSetTest {
     }
 
     @Test
+    void givesACubesNumbersAsTheColumnDeclares() throws Exception {
+        ResultSet resultSet = TableResultSet.of(new ListTable(List.of(
+                new DaxColumn("[Quantity]", Optional.empty(), DaxType.DECIMAL),
+                new DaxColumn("[Count]", Optional.empty(), DaxType.INTEGER),
+                new DaxColumn("[Average]", Optional.empty(), DaxType.DOUBLE)),
+                List.of(List.of(1.2345678E7, 42.0, 3L))));
+
+        assertThat(resultSet.next()).isTrue();
+        // a decimal without exponent, as xsd:decimal requires
+        assertThat(resultSet.getObject(1)).isEqualTo(new BigDecimal("12345678.0000"));
+        assertThat(resultSet.getObject(1).toString()).isEqualTo("12345678.0000");
+        assertThat(resultSet.getObject(2)).isEqualTo(42L);
+        assertThat(resultSet.getObject(3)).isEqualTo(3.0);
+    }
+
+    @Test
     void isForwardOnlyAndReadOnly() throws Exception {
         ResultSet resultSet = resultSet();
         assertThat(resultSet.getType()).isEqualTo(ResultSet.TYPE_FORWARD_ONLY);

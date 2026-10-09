@@ -17,20 +17,24 @@ import java.time.LocalDateTime;
 import java.time.LocalTime;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Set;
 import java.util.StringJoiner;
 
 import org.eclipse.daanse.dax.engine.api.DaxType;
 import org.eclipse.daanse.dax.engine.impl.mdx.MdxQuery.ValueSource;
 import org.eclipse.daanse.dax.engine.impl.model.ModelColumn;
+import org.eclipse.daanse.dax.engine.impl.model.ModelMeasure;
 import org.eclipse.daanse.dax.engine.impl.plan.NamedMeasure;
 import org.eclipse.daanse.dax.engine.impl.plan.ScalarPlan;
 import org.eclipse.daanse.dax.engine.impl.plan.ScalarPlan.ColumnAggregate;
 import org.eclipse.daanse.dax.engine.impl.plan.ScalarPlan.ColumnValue;
 import org.eclipse.daanse.dax.engine.impl.plan.ScalarPlan.Comparison;
 import org.eclipse.daanse.dax.engine.impl.plan.ScalarPlan.Constant;
+import org.eclipse.daanse.dax.engine.impl.plan.ScalarPlan.Currency;
 import org.eclipse.daanse.dax.engine.impl.plan.ScalarPlan.InList;
 import org.eclipse.daanse.dax.engine.impl.plan.ScalarPlan.IsBlank;
 import org.eclipse.daanse.dax.engine.impl.plan.ScalarPlan.Logical;
@@ -106,18 +110,27 @@ public final class MdxGenerator {
             sources.add(groupValues.containsKey(column) ? new ValueSource.GroupValue(member, groupValues.get(column))
                     : source(member, column));
         }
+        List<TablePlan> kept = new ArrayList<>();
+        Map<String, List<TablePlan>> sliced = new LinkedHashMap<>();
+        for (TablePlan filter : summarize.filters()) {
+            List<ModelColumn> columns = Summarize.filterColumns(filter);
+            if (columns.stream().anyMatch(c -> deepest.containsKey(c.hierarchy()))) {
+                kept.add(filter);
+            } else {
+                // the filters on the same hierarchies are one set of the slicer
+                String together = String.join(", ", columns.stream().map(ModelColumn::hierarchy).distinct().toList());
+                sliced.computeIfAbsent(together, h -> new ArrayList<>()).add(filter);
+            }
+        }
+        summarize = inFilters(summarize, deepest, kept, mdx);
         Measures measures = measures(summarize, mdx, sources, !groups.isEmpty());
         String keeping = measures.keeping();
 
         mdx.append("SELECT ").append(measures.all()).append(" ON COLUMNS");
         String slicer = null;
-        List<TablePlan> kept = new ArrayList<>();
-        for (TablePlan filter : summarize.filters()) {
-            if (Summarize.filterColumns(filter).stream().anyMatch(c -> deepest.containsKey(c.hierarchy()))) {
-                kept.add(filter);
-            } else {
-                slicer = slicer == null ? filterSet(filter) : "CrossJoin(" + slicer + ", " + filterSet(filter) + ")";
-            }
+        for (List<TablePlan> filters : sliced.values()) {
+            String set = intersection(filters);
+            slicer = slicer == null ? set : "CrossJoin(" + slicer + ", " + set + ")";
         }
         boolean rows = !deepest.isEmpty();
         if (rows) {
@@ -140,6 +153,77 @@ public final class MdxGenerator {
             mdx.append(" WHERE ").append(slicer);
         }
         return new MdxQuery(mdx.toString(), sources, rows);
+    }
+
+    /**
+     * Filter tables on a level of a hierarchy grouped by deeper than the groups
+     * restrict what the measures compute for a group to its members of that
+     * level the filters keep: each measure is replaced by a calculated member
+     * aggregating it over them, if all are stored; else they are computed for
+     * the groups. The groups are kept as before, by {@code Exists} of the
+     * filters.
+     *
+     * @return the grouping computing the measures over the members kept
+     */
+    private static Summarize inFilters(Summarize summarize, Map<String, ModelColumn> deepest, List<TablePlan> kept,
+            StringBuilder mdx) {
+        StringJoiner scope = new StringJoiner(", ");
+        int hierarchies = 0;
+        for (Map.Entry<String, ModelColumn> grouped : deepest.entrySet()) {
+            List<TablePlan> filters = kept.stream().filter(f -> Summarize.filterColumns(f).stream()
+                    .allMatch(c -> c.hierarchy().equals(grouped.getKey()))).toList();
+            ModelColumn level = deepest(filters.stream().flatMap(f -> Summarize.filterColumns(f).stream()).toList())
+                    .get(grouped.getKey());
+            if (level == null || level.depth() <= grouped.getValue().depth()) {
+                continue;
+            }
+            String members = "Descendants(" + grouped.getKey() + ".CurrentMember, " + level.level() + ")";
+            for (TablePlan filter : filters) {
+                members = "Exists(" + members + ", " + filterSet(filter) + ")";
+            }
+            scope.add(members);
+            hierarchies++;
+        }
+        Set<ModelMeasure> measures = new LinkedHashSet<>();
+        summarize.withMeasures(measure -> {
+            measures.add(measure);
+            return measure;
+        });
+        // a calculated measure is not aggregated: it is computed for the group,
+        // as for one of SUMMARIZE of GENERATE keeping where it is not BLANK
+        if (hierarchies == 0 || !measures.stream().allMatch(ModelMeasure::stored)) {
+            return summarize;
+        }
+        String set = hierarchies == 1 ? scope.toString() : "CrossJoin(" + scope + ")";
+        Map<ModelMeasure, ModelMeasure> replaced = new LinkedHashMap<>();
+        Summarize computed = summarize.withMeasures(measure -> replaced.computeIfAbsent(measure,
+                m -> new ModelMeasure(m.name(), "[Measures]." + MdxNames.quote("DAX in filters " + m.name()),
+                        m.stored(), m.type())));
+        for (Map.Entry<ModelMeasure, ModelMeasure> measure : replaced.entrySet()) {
+            mdx.append(mdx.isEmpty() ? "WITH " : " ").append("MEMBER ").append(measure.getValue().uniqueName())
+                    .append(" AS Aggregate(").append(set).append(", ").append(measure.getKey().uniqueName())
+                    .append(")");
+        }
+        return computed;
+    }
+
+    /**
+     * @param filters filter tables on one hierarchy
+     * @return the members of the deepest level of them all keep: of each, those
+     *         related to members of all others
+     */
+    private static String intersection(List<TablePlan> filters) {
+        List<TablePlan> deepestFirst = new ArrayList<>(filters);
+        deepestFirst.sort((a, b) -> Integer.compare(depth(b), depth(a)));
+        String set = filterSet(deepestFirst.getFirst());
+        for (TablePlan filter : deepestFirst.subList(1, deepestFirst.size())) {
+            set = "Exists(" + set + ", " + filterSet(filter) + ")";
+        }
+        return set;
+    }
+
+    private static int depth(TablePlan filter) {
+        return Summarize.filterColumns(filter).stream().mapToInt(ModelColumn::depth).max().orElse(0);
     }
 
     /**
@@ -424,6 +508,9 @@ public final class MdxGenerator {
         case Not not -> "NOT " + operand(not.operand(), columns, current);
         case IsBlank isBlank -> "IsEmpty(" + condition(isBlank.operand(), columns, current) + ")";
         case ColumnAggregate aggregate -> aggregate(aggregate);
+        // CCur, which the cube does not know: the number rounded to four places
+        case Currency currency -> "Round(CDbl(" + condition(currency.operand(), columns, current) + "), "
+                + ScalarPlan.CURRENCY_SCALE + ")";
         };
     }
 

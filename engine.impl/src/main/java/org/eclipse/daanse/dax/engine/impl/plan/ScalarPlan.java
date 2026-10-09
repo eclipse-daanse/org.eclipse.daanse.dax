@@ -13,6 +13,7 @@
 package org.eclipse.daanse.dax.engine.impl.plan;
 
 import java.math.BigDecimal;
+import java.math.RoundingMode;
 import java.time.LocalDateTime;
 import java.util.ArrayList;
 import java.util.Collections;
@@ -20,6 +21,7 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.function.UnaryOperator;
 
 import org.eclipse.daanse.dax.engine.api.DaxExecutionException;
 import org.eclipse.daanse.dax.engine.api.DaxType;
@@ -213,6 +215,72 @@ public sealed interface ScalarPlan {
         public Object evaluate(List<Object> row) throws DaxExecutionException {
             return operand.evaluate(row) == null;
         }
+    }
+
+    /**
+     * {@code CURRENCY}: the value as a fixed decimal of four places, see
+     * {@link ScalarPlan#currency(Object)}.
+     */
+    record Currency(ScalarPlan operand) implements ScalarPlan {
+
+        public Currency {
+            Objects.requireNonNull(operand, "operand");
+        }
+
+        @Override
+        public Object evaluate(List<Object> row) throws DaxExecutionException {
+            return currency(operand.evaluate(row));
+        }
+    }
+
+    /** The places of a currency value, as of {@link DaxType#DECIMAL}. */
+    int CURRENCY_SCALE = 4;
+
+    /**
+     * @return the value as DAX's {@code CURRENCY} converts it: a number, a text
+     *         of a number or TRUE/FALSE as a fixed decimal rounded to four
+     *         places; BLANK is BLANK
+     * @throws DaxExecutionException if the value is no number
+     */
+    static BigDecimal currency(Object value) throws DaxExecutionException {
+        BigDecimal decimal;
+        try {
+            decimal = switch (value) {
+            case null -> null;
+            case BigDecimal d -> d;
+            case Double d -> BigDecimal.valueOf(d);
+            case Float f -> BigDecimal.valueOf(f.doubleValue());
+            case Number number -> new BigDecimal(number.toString());
+            case Boolean bool -> bool ? BigDecimal.ONE : BigDecimal.ZERO;
+            case String text -> new BigDecimal(text.strip());
+            default -> throw new NumberFormatException();
+            };
+        } catch (NumberFormatException notANumber) {
+            throw new DaxExecutionException("CURRENCY cannot convert the value '" + value + "' of type "
+                    + DaxType.of(value) + " to currency", notANumber);
+        }
+        return decimal == null ? null : decimal.setScale(CURRENCY_SCALE, RoundingMode.HALF_UP);
+    }
+
+    /**
+     * @param measures the measure to compute instead of each
+     * @return the plan computing the measures it gives instead
+     */
+    static ScalarPlan withMeasures(ScalarPlan plan, UnaryOperator<ModelMeasure> measures) {
+        return switch (plan) {
+        case MeasureValue measure -> new MeasureValue(measures.apply(measure.measure()));
+        case Comparison comparison -> new Comparison(comparison.operator(),
+                withMeasures(comparison.left(), measures), withMeasures(comparison.right(), measures));
+        case InList in -> new InList(withMeasures(in.value(), measures), in.values());
+        case Logical logical -> new Logical(logical.operator(), withMeasures(logical.left(), measures),
+                withMeasures(logical.right(), measures));
+        case Not not -> new Not(withMeasures(not.operand(), measures));
+        case IsBlank isBlank -> new IsBlank(withMeasures(isBlank.operand(), measures));
+        case Currency currency -> new Currency(withMeasures(currency.operand(), measures));
+        case Constant constant -> constant;
+        case ColumnValue column -> column;
+        case ColumnAggregate aggregate -> aggregate;
+        };
     }
 
     /**

@@ -77,7 +77,7 @@ final class TableResultSet implements ResultSet {
         while (table.next()) {
             Object[] values = new Object[columns.size()];
             for (int c = 0; c < values.length; c++) {
-                values[c] = JdbcTypes.jdbcValue(table.getObject(c));
+                values[c] = JdbcTypes.jdbcValue(columns.get(c).type(), table.getObject(c));
             }
             rows.add(values);
         }

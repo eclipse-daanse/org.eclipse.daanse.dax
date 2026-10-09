@@ -39,10 +39,13 @@ import org.eclipse.daanse.dax.engine.impl.mdx.MdxQuery.ValueSource.CellValue;
 import org.eclipse.daanse.dax.engine.impl.mdx.MdxQuery.ValueSource.GroupValue;
 import org.eclipse.daanse.dax.engine.impl.mdx.MdxQuery.ValueSource.MemberName;
 import org.eclipse.daanse.dax.engine.impl.mdx.MdxQuery.ValueSource.MemberProperty;
+import org.eclipse.daanse.dax.engine.impl.plan.AddColumns;
 import org.eclipse.daanse.dax.engine.impl.plan.Binder;
+import org.eclipse.daanse.dax.engine.impl.plan.EvaluatePlan.SortKey;
 import org.eclipse.daanse.dax.engine.impl.plan.Generate;
 import org.eclipse.daanse.dax.engine.impl.plan.NamedMeasure;
 import org.eclipse.daanse.dax.engine.impl.plan.QueryPlan;
+import org.eclipse.daanse.dax.engine.impl.plan.Rollup;
 import org.eclipse.daanse.dax.engine.impl.plan.ScalarPlan;
 import org.eclipse.daanse.dax.engine.impl.plan.ScalarPlan.Comparison;
 import org.eclipse.daanse.dax.engine.impl.plan.ScalarPlan.Constant;
@@ -97,6 +100,26 @@ class MdxGeneratorTest {
         assertThat(query.text()).isEqualTo("SELECT {} ON COLUMNS, "
                 + "Filter([Markets].[Country].Members, [Measures].[Sales] > 100000) ON ROWS FROM [SteelWheelsSales]");
         assertThat(query.sources()).containsExactly(new MemberName(0, 1));
+    }
+
+    @Test
+    void currencyOfTextIsANumberTheCubeCompares() throws Exception {
+        QueryPlan plan = new Binder(TestModel.model(), Map.of()).bind(new CCCDaxParserProvider()
+                .newParser("EVALUATE FILTER(VALUES('Markets'[Country]), [Sales] >= CURRENCY(\"442\"))")
+                .parseDaxStatement());
+        MdxQuery query = MdxGenerator.summarize("[SteelWheelsSales]", (Summarize) plan.evaluates().get(0).table());
+        assertThat(query.text()).isEqualTo("SELECT {} ON COLUMNS, "
+                + "Filter([Markets].[Country].Members, [Measures].[Sales] >= 442.0000) ON ROWS FROM [SteelWheelsSales]");
+    }
+
+    @Test
+    void currencyOfMeasureIsRoundedByTheCube() throws Exception {
+        QueryPlan plan = new Binder(TestModel.model(), Map.of()).bind(new CCCDaxParserProvider()
+                .newParser("EVALUATE FILTER(VALUES('Markets'[Country]), CURRENCY([Sales]) > 100)")
+                .parseDaxStatement());
+        MdxQuery query = MdxGenerator.summarize("[SteelWheelsSales]", (Summarize) plan.evaluates().get(0).table());
+        assertThat(query.text()).isEqualTo("SELECT {} ON COLUMNS, Filter([Markets].[Country].Members, "
+                + "Round(CDbl([Measures].[Sales]), 4) > 100) ON ROWS FROM [SteelWheelsSales]");
     }
 
     @Test
@@ -286,6 +309,35 @@ class MdxGeneratorTest {
                 + "[Date].[Year].Members), {[Measures].[Sales]}))) ON ROWS FROM [C]");
         assertThat(query.sources()).containsExactly(new MemberName(0, 1), new MemberName(1, 1),
                 new MemberName(2, 1), new CellValue(0));
+    }
+
+    @Test
+    void calculateTableOfGenerateFilteredOnItsFirstTable() throws Exception {
+        QueryPlan plan = new Binder(TestModel.model(), Map.of()).bind(new CCCDaxParserProvider().newParser("""
+                EVALUATE TOPN(501, CALCULATETABLE(ADDCOLUMNS(KEEPFILTERS(GENERATE(
+                        KEEPFILTERS(VALUES('Product'[Category])),
+                        FILTER(KEEPFILTERS(VALUES('Product'[Subcategory])),
+                            OR(NOT(ISBLANK('Measures'[Sales])), NOT(ISBLANK('Measures'[Unit Sales])))))),
+                        "S", 'Measures'[Sales], "U", 'Measures'[Unit Sales]),
+                    KEEPFILTERS(FILTER(KEEPFILTERS(VALUES('Product'[Category])), 'Product'[Category] = "Bikes"))),
+                    'Product'[Category], 1, 'Product'[Subcategory], 1)
+                ORDER BY 'Product'[Category], 'Product'[Subcategory]
+                """).parseDaxStatement());
+        TopN topN = (TopN) plan.evaluates().get(0).table();
+        MdxQuery query = MdxGenerator.generate("[C]", (Generate) topN.source());
+        assertThat(query.text()).isEqualTo("SELECT {[Measures].[Sales], [Measures].[Unit Sales]} ON COLUMNS, "
+                + "Generate(Filter([Product].[Category].Members, UCase([Product].CurrentMember.Name) = \"BIKES\"), "
+                + "Filter(Descendants([Product].CurrentMember, [Product].[Subcategory]), "
+                + "NOT IsEmpty([Measures].[Sales]) OR NOT IsEmpty([Measures].[Unit Sales]))) ON ROWS FROM [C]");
+    }
+
+    @Test
+    void calculateTableOfGenerateFilteredOnOtherColumnsIsNotSupported() {
+        assertThatThrownBy(() -> new Binder(TestModel.model(), Map.of()).bind(new CCCDaxParserProvider().newParser("""
+                EVALUATE CALCULATETABLE(GENERATE(VALUES('Product'[Category]), VALUES('Date'[Year])),
+                    FILTER(VALUES('Markets'[Country]), 'Markets'[Country] = "Canada"))
+                """).parseDaxStatement())).isInstanceOf(DaxSemanticException.class)
+                .hasMessageContaining("CALCULATETABLE of GENERATE filtered on columns other than of its first table");
     }
 
     @Test
@@ -666,11 +718,108 @@ class MdxGeneratorTest {
                 + "SELECT {[Measures].[Store Sqft]} ON COLUMNS, Filter({[Store].[Store].[DAX group 1]}, "
                 + "NOT IsEmpty([Measures].[Store Sqft])) ON ROWS FROM [C]");
 
-        // a top of each outer row is not one of the groups
-        assertThatThrownBy(() -> new Binder(model, Map.of()).bind(new CCCDaxParserProvider().newParser("""
+        // a top of each outer row: the first groups of each value of the outer one
+        TopN top = (TopN) new Binder(model, Map.of()).bind(new CCCDaxParserProvider().newParser("""
                 EVALUATE GENERATE(VALUES('Store'[Store.Store.Store Name.Frozen Sqft]),
                     TOPN(1, SUMMARIZECOLUMNS('Store'[Store.Store.Store Name.Store Type], "S", [Store Sqft]), [S]))
-                """).parseDaxStatement())).isInstanceOf(DaxSemanticException.class);
+                """).parseDaxStatement()).evaluates().get(0).table();
+        assertThat(top.partition()).isEqualTo(1);
+        assertThat(((Summarize) top.source()).byValues()).containsExactly("[Store].[Store]");
+    }
+
+    @Test
+    void summarizeOfGenerateKeepingNonBlankGroupsWhereTheMeasureIsNotBlank() throws Exception {
+        ModelColumn country = new ModelColumn("Store", "Store.Store.Store Country", "[Store].[Store]",
+                "[Store].[Store].[Store Country]", 1, DaxType.STRING);
+        ModelColumn state = new ModelColumn("Store", "Store.Store.Store State", "[Store].[Store]",
+                "[Store].[Store].[Store State]", 2, DaxType.STRING);
+        ModelMeasure sqft = new ModelMeasure("Store Sqft", "[Measures].[Store Sqft]", true);
+        TabularModel model = new TabularModel("[C]", List.of(new ModelTable("Store", List.of(country, state))),
+                List.of(sqft));
+        QueryPlan plan = new Binder(model, Map.of()).bind(new CCCDaxParserProvider().newParser("""
+                EVALUATE TOPN(501, SUMMARIZE(KEEPFILTERS(GENERATE(
+                        KEEPFILTERS(VALUES('Store'[Store.Store.Store Country])),
+                        FILTER(KEEPFILTERS(VALUES('Store'[Store.Store.Store State])),
+                            NOT(ISBLANK('Measures'[Store Sqft]))))),
+                    'Store'[Store.Store.Store Country], "MeasuresStoreSqft", 'Measures'[Store Sqft]),
+                    'Store'[Store.Store.Store Country], 1)
+                ORDER BY 'Store'[Store.Store.Store Country]""").parseDaxStatement());
+        Summarize summarize = (Summarize) ((TopN) plan.evaluates().get(0).table()).source();
+        assertThat(summarize.groupBy()).containsExactly(country);
+        MdxQuery query = MdxGenerator.summarize("[C]", summarize);
+        assertThat(query.text()).isEqualTo("SELECT {[Measures].[Store Sqft]} ON COLUMNS, "
+                + "Filter([Store].[Store].[Store Country].Members, NOT IsEmpty([Measures].[Store Sqft])) ON ROWS FROM [C]");
+
+        // a measure not stored may be BLANK of a group though not of its members: the groups of the rows,
+        // the measures computed for them
+        TabularModel calculated = new TabularModel("[C]", List.of(new ModelTable("Store", List.of(country, state))),
+                List.of(sqft, new ModelMeasure("Growth", "[Measures].[Growth]")));
+        plan = new Binder(calculated, Map.of()).bind(new CCCDaxParserProvider().newParser("""
+                EVALUATE TOPN(501, SUMMARIZE(KEEPFILTERS(GENERATE(
+                        KEEPFILTERS(VALUES('Store'[Store.Store.Store Country])),
+                        FILTER(KEEPFILTERS(VALUES('Store'[Store.Store.Store State])),
+                            OR(NOT(ISBLANK('Measures'[Store Sqft])), NOT(ISBLANK('Measures'[Growth])))))),
+                    'Store'[Store.Store.Store Country], "S", 'Measures'[Store Sqft], "G", 'Measures'[Growth]),
+                    'Store'[Store.Store.Store Country], 1)
+                ORDER BY 'Store'[Store.Store.Store Country]""").parseDaxStatement());
+        summarize = (Summarize) ((TopN) plan.evaluates().get(0).table()).source();
+        assertThat(MdxGenerator.summarize("[C]", summarize).text()).isEqualTo(
+                "SELECT {[Measures].[Store Sqft], [Measures].[Growth]} ON COLUMNS, "
+                        + "Exists([Store].[Store].[Store Country].Members, Generate([Store].[Store].[Store Country].Members, "
+                        + "Filter(Descendants([Store].[Store].CurrentMember, [Store].[Store].[Store State]), "
+                        + "NOT IsEmpty([Measures].[Store Sqft]) OR NOT IsEmpty([Measures].[Growth])))) ON ROWS FROM [C]");
+        assertThatThrownBy(() -> new Binder(calculated, Map.of()).bind(new CCCDaxParserProvider().newParser("""
+                EVALUATE SUMMARIZE(GENERATE(VALUES('Store'[Store.Store.Store Country]),
+                        FILTER(VALUES('Store'[Store.Store.Store State]), NOT(ISBLANK([Growth])))),
+                    "G", [Growth])""").parseDaxStatement()))
+                .isInstanceOf(DaxSemanticException.class).hasMessageContaining("SUMMARIZE without columns");
+    }
+
+    @Test
+    void calculateTableOfSummarizeOfGeneratesFilteredOnLevelsOfTheGroupedHierarchy() throws Exception {
+        ModelColumn country = new ModelColumn("Store", "Store.Store.Store Country", "[Store].[Store]",
+                "[Store].[Store].[Store Country]", 1, DaxType.STRING);
+        ModelColumn state = new ModelColumn("Store", "Store.Store.Store State", "[Store].[Store]",
+                "[Store].[Store].[Store State]", 2, DaxType.STRING);
+        ModelColumn city = new ModelColumn("Store", "Store.Store.Store City", "[Store].[Store]",
+                "[Store].[Store].[Store City]", 3, DaxType.STRING);
+        ModelMeasure sqft = new ModelMeasure("Store Sqft", "[Measures].[Store Sqft]", true);
+        TabularModel model = new TabularModel("[C]", List.of(new ModelTable("Store", List.of(country, state, city))),
+                List.of(sqft));
+        QueryPlan plan = new Binder(model, Map.of()).bind(new CCCDaxParserProvider().newParser("""
+                EVALUATE TOPN(501, CALCULATETABLE(SUMMARIZE(KEEPFILTERS(GENERATE(KEEPFILTERS(GENERATE(
+                        KEEPFILTERS(VALUES('Store'[Store.Store.Store Country])), VALUES('Store'[Store.Store.Store State]))),
+                        FILTER(KEEPFILTERS(VALUES('Store'[Store.Store.Store City])), NOT(ISBLANK('Measures'[Store Sqft]))))),
+                    'Store'[Store.Store.Store Country], "MeasuresStoreSqft", 'Measures'[Store Sqft]),
+                    KEEPFILTERS(FILTER(KEEPFILTERS(VALUES('Store'[Store.Store.Store Country])),
+                        'Store'[Store.Store.Store Country] = "USA")),
+                    KEEPFILTERS(FILTER(KEEPFILTERS(VALUES('Store'[Store.Store.Store State])),
+                        'Store'[Store.Store.Store State] = "WA"))),
+                    'Store'[Store.Store.Store Country], 1)
+                ORDER BY 'Store'[Store.Store.Store Country]""").parseDaxStatement());
+        Summarize summarize = (Summarize) ((TopN) plan.evaluates().get(0).table()).source();
+        MdxQuery query = MdxGenerator.summarize("[C]", summarize);
+        String usa = "Filter([Store].[Store].[Store Country].Members, UCase([Store].[Store].CurrentMember.Name) = \"USA\")";
+        String wa = "Filter([Store].[Store].[Store State].Members, UCase([Store].[Store].CurrentMember.Name) = \"WA\")";
+        // the groups related to both filters; the measure aggregated over the states of each both keep
+        assertThat(query.text()).isEqualTo("WITH MEMBER [Measures].[DAX in filters Store Sqft] AS Aggregate(Exists("
+                + "Exists(Descendants([Store].[Store].CurrentMember, [Store].[Store].[Store State]), " + usa + "), " + wa
+                + "), [Measures].[Store Sqft]) SELECT {[Measures].[DAX in filters Store Sqft]} ON COLUMNS, Filter("
+                + "Exists(Exists([Store].[Store].[Store Country].Members, " + usa + "), " + wa + "), "
+                + "NOT IsEmpty([Measures].[DAX in filters Store Sqft])) ON ROWS FROM [C]");
+    }
+
+    @Test
+    void severalFilterTablesOnAHierarchyNotGroupedByAreTheirIntersectionInTheSlicer() throws Exception {
+        QueryPlan plan = new Binder(TestModel.model(), Map.of()).bind(new CCCDaxParserProvider().newParser(
+                "EVALUATE SUMMARIZECOLUMNS('Product'[Category], FILTER(VALUES('Markets'[Country]), [Sales] > 1), "
+                        + "FILTER(VALUES('Markets'[Country]), [Sales] < 9), \"S\", [Sales Amount])")
+                .parseDaxStatement());
+        MdxQuery query = MdxGenerator.summarize("[C]", (Summarize) plan.evaluates().get(0).table());
+        assertThat(query.text()).isEqualTo("SELECT {[Measures].[Sales Amount]} ON COLUMNS, "
+                + "NON EMPTY [Product].[Category].Members ON ROWS FROM [C] WHERE "
+                + "Exists(Filter([Markets].[Country].Members, [Measures].[Sales] > 1), "
+                + "Filter([Markets].[Country].Members, [Measures].[Sales] < 9))");
     }
 
     private static ModelColumn storeProperty(ModelColumn level, String property, DaxType type) {
@@ -696,6 +845,73 @@ class MdxGeneratorTest {
         assertThat(query.sources()).containsExactly(new GroupValue(0, Map.of("DAX group 1", "Paris")),
                 new GroupValue(0, Map.of("DAX group 1", "F")), new MemberName(1, 1), new CellValue(0),
                 new CellValue(1));
+    }
+
+    @Test
+    void generateOfTopNOfSummarizeWithRollupOfAPropertyGroupsEachOuterRow() throws Exception {
+        ModelColumn country = customerLevel("Country", 1);
+        ModelColumn name = customerLevel("Name", 4);
+        ModelColumn education = new ModelColumn("Customers", "Customers.Customers.Name.Education", name.hierarchy(),
+                name.level(), 4, DaxType.STRING, Optional.of("Education"));
+        TabularModel model = new TabularModel("[C]", List.of(new ModelTable("Customers",
+                List.of(country, name, education))), List.of(new ModelMeasure("Profit", "[Measures].[Profit]")));
+        QueryPlan plan = bindCustomers(model, """
+                EVALUATE TOPN(10201, GENERATE(KEEPFILTERS(VALUES('Customers'[Customers.Customers.Country])),
+                        TOPN(102, SUMMARIZE(KEEPFILTERS(FILTER(
+                                KEEPFILTERS(VALUES('Customers'[Customers.Customers.Name.Education])),
+                                NOT(ISBLANK('Measures'[Profit])))),
+                            ROLLUP('Customers'[Customers.Customers.Name.Education]),
+                            "IsAggregate", ISSUBTOTAL('Customers'[Customers.Customers.Name.Education]),
+                            "MeasuresProfit", 'Measures'[Profit]),
+                            [IsAggregate], 1, 'Customers'[Customers.Customers.Name.Education], 1)),
+                    'Customers'[Customers.Customers.Country], 1, [IsAggregate], 1,
+                    'Customers'[Customers.Customers.Name.Education], 1)
+                ORDER BY 'Customers'[Customers.Customers.Country], [IsAggregate],
+                    'Customers'[Customers.Customers.Name.Education]""");
+        TopN outer = (TopN) plan.evaluates().get(0).table();
+        assertThat(outer.columns()).extracting(c -> c.name()).containsExactly(
+                "Customers[Customers.Customers.Country]", "Customers[Customers.Customers.Name.Education]",
+                "[IsAggregate]", "[MeasuresProfit]");
+        // the first of each country, the groups before their subtotal
+        TopN inner = (TopN) outer.source();
+        assertThat(inner.partition()).isEqualTo(1);
+        assertThat(inner.keys()).containsExactly(new SortKey(2, true), new SortKey(1, true));
+        AddColumns named = (AddColumns) inner.source();
+        Rollup rollup = (Rollup) named.source();
+        assertThat(rollup.keys()).isEqualTo(1);
+
+        // the groups of the values of each country, kept where the profit is not BLANK
+        Summarize groups = (Summarize) rollup.levels().get(0);
+        assertThat(groups.groupBy()).containsExactly(country, education);
+        assertThat(groups.byValues()).containsExactly("[Customers].[Customers]");
+        assertThat(MdxGenerator.summarize("[C]", groups, Map.of("[Customers].[Customers]",
+                List.of(List.of("USA", "College")))).text()).isEqualTo("WITH MEMBER [Customers].[Customers]."
+                        + "[DAX group 1] AS Aggregate(Filter([Customers].[Customers].[Name].Members, "
+                        + "(Ancestor([Customers].[Customers].CurrentMember, [Customers].[Customers].[Country]).Name"
+                        + " = \"USA\") AND ([Customers].[Customers].CurrentMember.Properties(\"Education\") = "
+                        + "\"College\"))) SELECT {[Measures].[Profit]} ON COLUMNS, Filter({[Customers].[Customers]."
+                        + "[DAX group 1]}, NOT IsEmpty([Measures].[Profit])) ON ROWS FROM [C]");
+        // the subtotal of each country
+        assertThat(MdxGenerator.generate("[C]", (Generate) rollup.levels().get(1)).text()).isEqualTo(
+                "SELECT {[Measures].[Profit]} ON COLUMNS, [Customers].[Customers].[Country].Members ON ROWS FROM [C]");
+
+        // a subtotal is kept where there are groups
+        List<List<Object>> rows = rollup.apply(List.of(
+                List.of(Arrays.asList("USA", "College", 5.0), Arrays.asList("USA", "Bachelors", 7.0)),
+                List.of(Arrays.asList("USA", 12.0), Arrays.<Object>asList("Mexico", 3.0))));
+        assertThat(rows).containsExactly(Arrays.asList("USA", "College", 5.0, false),
+                Arrays.asList("USA", "Bachelors", 7.0, false), Arrays.asList("USA", null, 12.0, true));
+        List<List<Object>> result = inner.apply(named.apply(rows));
+        assertThat(result).containsExactly(Arrays.asList("USA", "Bachelors", false, 7.0),
+                Arrays.asList("USA", "College", false, 5.0), Arrays.asList("USA", null, true, 12.0));
+    }
+
+    @Test
+    void summarizeOfSomeColumnsOfAFilterByCalculatedMeasuresIsNotSupported() {
+        assertThatThrownBy(() -> bindCustomers("""
+                EVALUATE SUMMARIZE(FILTER(SUMMARIZECOLUMNS('Customers'[Customers.Customers.City],
+                        'Date'[Year]), NOT(ISBLANK([Sales]))), 'Date'[Year])""")).isInstanceOf(
+                                DaxSemanticException.class);
     }
 
     @Test

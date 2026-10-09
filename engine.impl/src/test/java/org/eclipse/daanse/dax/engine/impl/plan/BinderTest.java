@@ -12,6 +12,7 @@
  */
 package org.eclipse.daanse.dax.engine.impl.plan;
 
+import java.math.BigDecimal;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.eclipse.daanse.dax.engine.impl.TestModel.CATEGORY;
@@ -263,6 +264,24 @@ class BinderTest {
         ConstantTable table = (ConstantTable) plan.evaluates().get(0).table();
         assertThat(table.columns()).extracting(DaxColumn::type).containsOnly(DaxType.BOOLEAN);
         assertThat(table.rows()).containsExactly(List.of(true, false, true, true, false, true, true));
+    }
+
+    @Test
+    void currencyOfConstants() throws Exception {
+        QueryPlan plan = bind("EVALUATE ROW(\"text\", CURRENCY(\"442\"), \"rounded\", CURRENCY(1.23456), "
+                + "\"whole\", CURRENCY(7), \"true\", CURRENCY(TRUE), \"param\", CURRENCY(@p))", Map.of("p", "-0.00005"));
+        ConstantTable table = (ConstantTable) plan.evaluates().get(0).table();
+        assertThat(table.columns()).extracting(DaxColumn::type).containsOnly(DaxType.DECIMAL);
+        assertThat(table.rows()).containsExactly(List.of(new BigDecimal("442.0000"), new BigDecimal("1.2346"),
+                new BigDecimal("7.0000"), new BigDecimal("1.0000"), new BigDecimal("-0.0001")));
+    }
+
+    @Test
+    void currencyOfBlankIsBlankAndOfTextNoNumberAnError() throws Exception {
+        ConstantTable table = (ConstantTable) single("EVALUATE ROW(\"blank\", CURRENCY(BLANK()))");
+        assertThat(table.rows()).containsExactly(Arrays.asList((Object) null));
+        assertThatThrownBy(() -> bind("EVALUATE ROW(\"x\", CURRENCY(\"abc\"))"))
+                .isInstanceOf(DaxSemanticException.class).hasMessageContaining("CURRENCY cannot convert");
     }
 
     @Test
@@ -583,8 +602,7 @@ class BinderTest {
             "EVALUATE SUMMARIZECOLUMNS('Product'[Category], KEEPFILTERS(), \"S\", [Sales Amount])|KEEPFILTERS takes one table", //
             "EVALUATE SUMMARIZECOLUMNS('Product'[Category], {1}, \"S\", [Sales Amount])|SUMMARIZECOLUMNS with a filter table of kind ConstantTable or with conditions other than on the text of columns and on measures is not supported yet", //
             "EVALUATE SUMMARIZECOLUMNS('Product'[Category], FILTER(VALUES('Markets'[Country]), 'Markets'[Country] = 1), \"S\", [Sales Amount])|SUMMARIZECOLUMNS with a filter table of kind Filter or with conditions other than on the text of columns and on measures is not supported yet", //
-            "EVALUATE SUMMARIZECOLUMNS('Product'[Category], FILTER(VALUES('Markets'[Country]), [Sales] > 1), FILTER(VALUES('Markets'[Country]), [Sales] < 9), \"S\", [Sales Amount])|several filter tables on the hierarchy [Markets] is not supported yet", //
-            "EVALUATE SUMMARIZECOLUMNS('Product'[Category], FILTER(VALUES('Product'[Subcategory]), 'Product'[Subcategory] = \"Road\"), \"S\", [Sales Amount])|a filter table on Product[Subcategory], deeper than SUMMARIZECOLUMNS groups by is not supported yet", //
+            "EVALUATE SUMMARIZECOLUMNS('Product'[Category], FILTER(VALUES('Product'[Subcategory]), 'Product'[Subcategory] = \"Road\"), \"S\", [Sales Amount])|a filter table on Product[Subcategory], deeper than SUMMARIZECOLUMNS groups by, with measures other than stored ones or on several hierarchies is not supported yet", //
             "EVALUATE SUMMARIZECOLUMNS('Product'[Category], FILTER(SUMMARIZECOLUMNS('Product'[Category], 'Markets'[Country]), 'Markets'[Country] = \"USA\"), \"S\", [Sales Amount])|a filter table on hierarchies grouped by and others is not supported yet", //
             "EVALUATE FILTER(SUMMARIZECOLUMNS('Product'[Category], FILTER(VALUES('Markets'[Country]), [Sales] > 1), \"S\", [Sales Amount]), [Unit Sales] > 1)|FILTER by a measure of SUMMARIZECOLUMNS with filter tables is not supported yet", //
             "EVALUATE CALCULATETABLE('Product', 1 = 1)|a condition filtering CALCULATETABLE must refer to a column", //
@@ -597,7 +615,7 @@ class BinderTest {
             "EVALUATE CALCULATETABLE(ROW(\"S\", [Sales]), FILTER(VALUES('Markets'[Country]), [Sales] > 1), 'Date'[Year] = \"2020\")|CALCULATETABLE with several filters, of them one by a measure is not supported yet", //
             "EVALUATE CALCULATETABLE(SUMMARIZECOLUMNS('Product'[Category], TOPN(3, VALUES('Markets'[Country]), [Sales]), \"S\", [Sales]), 'Date'[Year] = \"2020\")|CALCULATETABLE with several filters, of them one by a measure is not supported yet", //
             "EVALUATE CALCULATETABLE(VALUES('Store'[City]), 'Store'[Type] = \"Big\")|CALCULATETABLE of columns without measures filtered on other hierarchies of their table is not supported yet", //
-            "EVALUATE CALCULATETABLE(FILTER(VALUES('Product'[Category]), [Sales] > 1), 'Product'[Subcategory] = \"Road\")|a filter table on Product[Subcategory], deeper than SUMMARIZECOLUMNS groups by is not supported yet", //
+            "EVALUATE CALCULATETABLE(FILTER(VALUES('Product'[Category]), [Sales] > 1), 'Product'[Subcategory] = \"Road\")|a filter table on Product[Subcategory], deeper than SUMMARIZECOLUMNS groups by, with measures other than stored ones or on several hierarchies is not supported yet", //
             "EVALUATE FILTER(CALCULATETABLE(VALUES('Product'[Category]), 'Markets'[Country] = \"USA\"), [Sales] > 1)|FILTER by a measure of SUMMARIZECOLUMNS with filter tables is not supported yet", //
             "EVALUATE ADDCOLUMNS('Product')|ADDCOLUMNS takes a table and pairs of a name and an expression", //
             "EVALUATE ADDCOLUMNS('Product', \"x\")|ADDCOLUMNS takes a table and pairs of a name and an expression", //
@@ -607,13 +625,16 @@ class BinderTest {
             "EVALUATE SUMMARIZE('Product', 'Product'[Category], \"x\")|SUMMARIZE takes pairs of a name and an expression after its columns", //
             "EVALUATE SUMMARIZE('Product', 'Markets'[Country])|SUMMARIZE: the column Markets[Country] is not of its table", //
             "EVALUATE SUMMARIZE(VALUES('Product'[Category]), 'Product'[Subcategory])|SUMMARIZE: the column Product[Subcategory] is not of its table", //
-            "EVALUATE SUMMARIZE('Product', ROLLUP('Product'[Category]))|SUMMARIZE with ROLLUP is not supported yet", //
+            "EVALUATE SUMMARIZE('Product', ROLLUPGROUP('Product'[Category]))|SUMMARIZE with ROLLUPGROUP is not supported yet", //
+            "EVALUATE SUMMARIZE('Product', ROLLUP(ROLLUPGROUP('Product'[Category])))|SUMMARIZE with ROLLUPGROUP is not supported yet", //
+            "EVALUATE SUMMARIZE('Product', ROLLUP('Product'[Category]), 'Product'[Subcategory])|SUMMARIZE with columns after ROLLUP is not supported yet", //
+            "EVALUATE SUMMARIZE('Product', 'Product'[Category], \"s\", ISSUBTOTAL('Date'[Year]))|ISSUBTOTAL: SUMMARIZE does not group by Date[Year]", //
             "EVALUATE SUMMARIZE('Product', 'Product'[Category], \"x\", 1)|SUMMARIZE with an expression of kind NumericLiteral of no measure is not supported yet", //
             "EVALUATE SUMMARIZE('Product', 'Product'[Category], \"x\", [Sales], \"X\", [Sales])|SUMMARIZE: the column [X] exists already", //
-            "EVALUATE SUMMARIZE(FILTER(VALUES('Markets'[Country]), [Sales] > 1), 'Markets'[Country])|SUMMARIZE of a table other than a table, its VALUES or DISTINCT or a grouping of columns is not supported yet", //
+            "EVALUATE SUMMARIZE(FILTER(SUMMARIZECOLUMNS('Product'[Category], 'Markets'[Country]), [Sales] > 1), 'Markets'[Country])|SUMMARIZE by some of the columns of FILTER by measures, other than stored ones not BLANK is not supported yet", //
             "EVALUATE SAMPLE(3, VALUES('Markets'[Country]))|SAMPLE takes a number of rows, a table and expressions to order by", //
             "EVALUATE SAMPLE(3, VALUES('Markets'[Country]), [Sales])|SAMPLE by a measure is not supported yet", //
-            "EVALUATE GENERATE(VALUES('Product'[Category]), CALCULATETABLE(VALUES('Date'[Year]), 'Markets'[Country] = \"USA\"))|GENERATE with a second table other than a grouping of columns and measures, e.g. VALUES, TOPN or FILTER by a measure, SUMMARIZECOLUMNS without filter tables or ROW is not supported yet", //
+            "EVALUATE GENERATE(VALUES('Product'[Category]), CALCULATETABLE(VALUES('Date'[Year]), 'Markets'[Country] = \"USA\"))|GENERATE with a second table other than a grouping of columns and measures, e.g. VALUES, TOPN or FILTER by a measure, SUMMARIZE, SUMMARIZECOLUMNS without filter tables or ROW, or TOPN, FILTER or ADDCOLUMNS of one is not supported yet", //
             "EVALUATE GENERATE(SUMMARIZECOLUMNS('Product'[Category], \"S\", [Sales]), VALUES('Date'[Year]))|GENERATE of a first table of kind Summarize, with measures or with conditions other than on the text of columns and on measures is not supported yet", //
             "EVALUATE GENERATE({1}, VALUES('Date'[Year]))|GENERATE of a first table of kind ConstantTable, with measures or with conditions other than on the text of columns and on measures is not supported yet", //
             "EVALUATE ADDCOLUMNS({1}, \"a\", 1, \"A\", 2)|ADDCOLUMNS: the column [A] exists already", //
