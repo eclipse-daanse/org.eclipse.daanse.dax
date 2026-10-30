@@ -828,6 +828,46 @@ class MdxGeneratorTest {
     }
 
     @Test
+    void filterByMeasuresOfAnInnerCalculateTableIsComputedWithinTheOuterFilters() throws Exception {
+        ModelColumn year = new ModelColumn("Time", "Time.Time.Year", "[Time].[Time]", "[Time].[Time].[Year]", 1,
+                DaxType.STRING);
+        TabularModel model = new TabularModel("[Sales]", List.of(new ModelTable("Time", List.of(year)),
+                new ModelTable("Customers", List.of(customerLevel("Name", 4)))),
+                List.of(new ModelMeasure("Profit", "[Measures].[Profit]"),
+                        new ModelMeasure("Store Cost", "[Measures].[Store Cost]", true),
+                        new ModelMeasure("Unit Sales", "[Measures].[Unit Sales]", true)));
+        String dax = """
+                EVALUATE CALCULATETABLE(CALCULATETABLE(ROW("M", 'Measures'[%1$s]),
+                        KEEPFILTERS(FILTER(KEEPFILTERS(VALUES('Time'[Time.Time.Year])),
+                            NOT(ISBLANK('Measures'[%2$s]))))),
+                    KEEPFILTERS(FILTER(KEEPFILTERS(VALUES('Customers'[Customers.Customers.Name])),
+                        'Customers'[Customers.Customers.Name] = "A. Catherine Binkley")))""";
+        String customer = "MEMBER [Customers].[Customers].[DAX slicer 1] AS Aggregate(Filter("
+                + "[Customers].[Customers].[Name].Members, UCase([Customers].[Customers].CurrentMember.Name) = "
+                + "\"A. CATHERINE BINKLEY\")), SOLVE_ORDER = -200 ";
+        String slicer = " WHERE ([Customers].[Customers].[DAX slicer 1], [Time].[Time].[DAX slicer 2])";
+        // the years where the customer's profit is not BLANK: the customer aggregated within them
+        QueryPlan plan = bindCustomers(model, dax.formatted("Profit", "Profit"));
+        assertThat(MdxGenerator.summarize("[Sales]", (Summarize) plan.evaluates().get(0).table()).text())
+                .isEqualTo("WITH " + customer + "MEMBER [Time].[Time].[DAX slicer 2] AS Aggregate(Filter("
+                        + "[Time].[Time].[Year].Members, NOT IsEmpty([Measures].[Profit]))), SOLVE_ORDER = -100 "
+                        + "SELECT {[Measures].[Profit]} ON COLUMNS FROM [Sales]" + slicer);
+        // of stored measures too, which take no current member
+        plan = bindCustomers(model, dax.formatted("Store Cost", "Unit Sales"));
+        assertThat(MdxGenerator.summarize("[Sales]", (Summarize) plan.evaluates().get(0).table()).text())
+                .isEqualTo("WITH " + customer + "MEMBER [Time].[Time].[DAX slicer 2] AS Aggregate(Filter("
+                        + "[Time].[Time].[Year].Members, NOT IsEmpty([Measures].[Unit Sales]))), SOLVE_ORDER = -100 "
+                        + "SELECT {[Measures].[Store Cost]} ON COLUMNS FROM [Sales]" + slicer);
+        // beside the other filter it is computed without it
+        assertThatThrownBy(() -> bindCustomers(model, """
+                EVALUATE CALCULATETABLE(ROW("M", 'Measures'[Profit]),
+                    KEEPFILTERS(FILTER(KEEPFILTERS(VALUES('Time'[Time.Time.Year])), NOT(ISBLANK('Measures'[Profit])))),
+                    KEEPFILTERS(FILTER(KEEPFILTERS(VALUES('Customers'[Customers.Customers.Name])),
+                        'Customers'[Customers.Customers.Name] = "A. Catherine Binkley")))"""))
+                .hasMessageContaining("CALCULATETABLE with several filters, of them one by a measure");
+    }
+
+    @Test
     void filtersOfGenerateOnColumnsOfItsInnerTableRestrictTheInnerTable() throws Exception {
         TabularModel model = new TabularModel("[C]", List.of(new ModelTable("Customers", List.of(
                 customerLevel("Country", 1), customerLevel("State Province", 2), customerLevel("City", 3)))),

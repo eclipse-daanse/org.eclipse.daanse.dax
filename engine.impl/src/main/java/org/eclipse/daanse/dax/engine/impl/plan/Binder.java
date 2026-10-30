@@ -928,17 +928,22 @@ public final class Binder {
         // without outer filters there is nothing KEEPFILTERS keeps
         addFilters(arguments.subList(1, arguments.size()), filters, true);
         DaxExpression source = arguments.get(0);
+        // the only filter of the innermost CALCULATETABLE, if inner, is computed within all others
+        Optional<TablePlan> within = Optional.empty();
         // the filters of an inner CALCULATETABLE apply within the outer ones
         while (source instanceof FunctionCall call && call.functionName().equalsIgnoreCase("CALCULATETABLE")
                 && !call.arguments().isEmpty()) {
+            List<TablePlan> outer = List.copyOf(filters);
             addFilters(call.arguments().subList(1, call.arguments().size()), filters, false);
+            List<TablePlan> added = filters.stream().filter(f -> !outer.contains(f)).toList();
+            within = added.size() == 1 && filters.size() > 1 ? Optional.of(added.getFirst()) : Optional.empty();
             source = call.arguments().get(0);
         }
         TablePlan table = table(source);
         if (filters.isEmpty()) {
             return table;
         }
-        return calculated(table, filters);
+        return calculated(table, filters, within);
     }
 
     /**
@@ -1117,10 +1122,13 @@ public final class Binder {
     }
 
     /**
+     * @param within the filter table computed within all the others, as the only
+     *               one of an inner CALCULATETABLE; empty if none is
      * @return the table computed with the filter tables too, as CALCULATETABLE
      *         computes it: they filter all the cube computes for it
      */
-    private static TablePlan calculated(TablePlan table, List<TablePlan> filters) throws DaxSemanticException {
+    private static TablePlan calculated(TablePlan table, List<TablePlan> filters, Optional<TablePlan> within)
+            throws DaxSemanticException {
         return switch (table) {
         case Summarize summarize -> {
             List<TablePlan> all = new ArrayList<>(summarize.filters());
@@ -1142,7 +1150,8 @@ public final class Binder {
             }
             all = together;
             // a filter by a measure would be computed within the others, or they within it
-            if (all.size() > 1 && all.stream().anyMatch(Binder::filtersByMeasure)) {
+            if (all.size() > 1 && all.stream().anyMatch(Binder::filtersByMeasure)
+                    && !computedWithinOthers(summarize, all, within)) {
                 throw notSupported("CALCULATETABLE with several filters, of them one by a measure");
             }
             Summarize calculated = new Summarize(summarize.groupBy(), summarize.measures(), summarize.condition(),
@@ -1168,23 +1177,23 @@ public final class Binder {
             yield calculated;
         }
         // the rows are computed as before, of the filtered source
-        case Filter filter -> new Filter(calculated(filter.source(), filters), filter.condition());
-        case TopN topN -> new TopN(calculated(topN.source(), filters), topN.count(), topN.keys(), topN.partition());
-        case Sample sample -> new Sample(calculated(sample.source(), filters), sample.count(), sample.keys());
+        case Filter filter -> new Filter(calculated(filter.source(), filters, within), filter.condition());
+        case TopN topN -> new TopN(calculated(topN.source(), filters, within), topN.count(), topN.keys(), topN.partition());
+        case Sample sample -> new Sample(calculated(sample.source(), filters, within), sample.count(), sample.keys());
         case Rollup rollup -> {
             List<TablePlan> levels = new ArrayList<>();
             for (TablePlan level : rollup.levels()) {
-                levels.add(calculated(level, filters));
+                levels.add(calculated(level, filters, within));
             }
             yield new Rollup(levels, rollup.keys(), rollup.rolled());
         }
         case AddColumns addColumns ->
-            new AddColumns(calculated(addColumns.source(), filters), addColumns.width(), addColumns.added());
+            new AddColumns(calculated(addColumns.source(), filters, within), addColumns.width(), addColumns.added());
         // constants are not filtered
         case ConstantTable constant -> constant;
         // by a property without its level, the grouping by all its columns filtered as one
         case Generate generate when computesByProperties(generate) && grouping(generate).isPresent() ->
-            calculated(grouping(generate).get(), filters);
+            calculated(grouping(generate).get(), filters, within);
         // the outer rows the filters keep, each joined with the inner ones computed for it
         case Generate generate -> {
             TablePlan outer = generate.outer();
@@ -1226,6 +1235,25 @@ public final class Binder {
             yield new Generate(outer, inner);
         }
         };
+    }
+
+    /**
+     * @param filters the filter tables of the measures without groups, as of
+     *                {@code ROW}
+     * @param within  the filter table computed within all the others
+     * @return whether it is the only one by a measure, on hierarchies none of
+     *         the others is: its members are the slicer, computed within those
+     *         the others keep, see MdxGenerator
+     */
+    private static boolean computedWithinOthers(Summarize summarize, List<TablePlan> filters,
+            Optional<TablePlan> within) {
+        if (!summarize.groupBy().isEmpty() || within.isEmpty() || !filters.contains(within.get())) {
+            return false;
+        }
+        Set<String> hierarchies = new HashSet<>();
+        Summarize.filterColumns(within.get()).forEach(c -> hierarchies.add(c.hierarchy()));
+        return filters.stream().filter(f -> !f.equals(within.get())).noneMatch(f -> filtersByMeasure(f)
+                || Summarize.filterColumns(f).stream().anyMatch(c -> hierarchies.contains(c.hierarchy())));
     }
 
     /**

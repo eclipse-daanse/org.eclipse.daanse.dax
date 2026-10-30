@@ -132,7 +132,7 @@ public final class MdxGenerator {
         }
         Set<ModelMeasure> computed = computedMeasures(summarize);
         summarize = inFilters(summarize, deepest, kept, mdx);
-        String slicer = slicer(sliced, computed, mdx);
+        String slicer = slicer(sliced, computed, deepest.isEmpty(), mdx);
         Measures measures = measures(summarize, mdx, sources, !groups.isEmpty());
         String keeping = measures.keeping();
 
@@ -182,16 +182,25 @@ public final class MdxGenerator {
      * {@code [Time].CurrentMember.PrevMember}, the others left at their
      * default members.
      * </p>
+     * <p>
+     * Of measures without groups, as of {@code ROW}, a filter table by
+     * measures beside others is computed within the members they keep, as of
+     * an inner CALCULATETABLE: each is a calculated member of a lower solve
+     * order than its one, which then computes its condition over theirs.
+     * </p>
      *
      * @param sliced   the filter tables, by the hierarchies they are on
      * @param computed the measures computed
+     * @param alone    whether the measures are computed without groups
      * @return the slicer; {@code null} without filter tables
      */
     private static String slicer(Map<List<String>, List<TablePlan>> sliced, Set<ModelMeasure> computed,
-            StringBuilder mdx) {
+            boolean alone, StringBuilder mdx) {
         List<String> sets = new ArrayList<>();
         List<String> members = new ArrayList<>();
         Set<String> taken = new LinkedHashSet<>();
+        boolean byMeasures = alone && sliced.size() > 1
+                && sliced.values().stream().anyMatch(f -> f.stream().anyMatch(MdxGenerator::byMeasures));
         for (Map.Entry<List<String>, List<TablePlan>> filters : sliced.entrySet()) {
             String set = intersection(filters.getValue());
             // the tuples of several hierarchies are one member of the first
@@ -199,6 +208,9 @@ public final class MdxGenerator {
             Optional<String> hierarchy = filters.getKey().stream()
                     .filter(h -> !taken.contains(h) && computed.stream().anyMatch(m -> m.takesCurrentMember(h)))
                     .findFirst();
+            if (byMeasures && hierarchy.isEmpty()) {
+                hierarchy = filters.getKey().stream().filter(h -> !taken.contains(h)).findFirst();
+            }
             if (hierarchy.isEmpty()) {
                 sets.add(set);
                 continue;
@@ -207,7 +219,8 @@ public final class MdxGenerator {
             String member = hierarchy.get() + "." + MdxNames.quote("DAX slicer " + (members.size() + 1));
             // computed before the measures, as members of the hierarchy each
             mdx.append(mdx.isEmpty() ? "WITH " : " ").append("MEMBER ").append(member).append(" AS Aggregate(")
-                    .append(set).append("), SOLVE_ORDER = -100");
+                    .append(set).append("), SOLVE_ORDER = ")
+                    .append(byMeasures && filters.getValue().stream().noneMatch(MdxGenerator::byMeasures) ? -200 : -100);
             members.add(member);
         }
         if (sets.isEmpty() && !members.isEmpty()) {
@@ -219,6 +232,16 @@ public final class MdxGenerator {
             slicer = slicer == null ? set : "CrossJoin(" + slicer + ", " + set + ")";
         }
         return slicer;
+    }
+
+    /** @return whether the filter table keeps members by measures computed for them */
+    private static boolean byMeasures(TablePlan filter) {
+        return switch (filter) {
+        case Summarize summarize -> summarize.condition().isPresent() || summarize.top().isPresent();
+        case Filter f -> byMeasures(f.source());
+        case Generate generate -> byMeasures(generate.outer()) || byMeasures(generate.inner());
+        default -> false;
+        };
     }
 
     /**
@@ -419,7 +442,7 @@ public final class MdxGenerator {
         }
         Set<ModelMeasure> computed = computedMeasures(inner);
         inner = inFilters(inner, deepest(grouped), deeper, mdx);
-        String slicer = slicer(sliced, computed, mdx);
+        String slicer = slicer(sliced, computed, false, mdx);
         Measures measures = measures(inner, mdx, sources, false);
 
         String set = filterSet(generate.outer());
